@@ -41,21 +41,26 @@ def call_grok(prompt, images=None, use_search=False):
         "Content-Type": "application/json"
     }
     
-    response = requests.post(GROK_API_URL, json=payload, headers=headers)
-    if response.status_code == 200:
+    try:
+        response = requests.post(GROK_API_URL, json=payload, headers=headers)
+        response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
-    else:
-        return f"Error: {response.text}"
+    except Exception as e:
+        return f"Error: {str(e)} - Retry or check connection/key."
 
 # Streamlit UI
 st.title("Marketplace Selling Assistant")
+st.markdown("Welcome! This app helps with any items—select category for tailored results. Safety tip: Meet in public, cash only.")
 
 tab1, tab2 = st.tabs(["Generate Listing", "Generate Response"])
 
 with tab1:
+    category = st.selectbox("Item Category", ["Baby/Toddler", "Vehicles", "Equipment", "Clothing", "Electronics", "Furniture", "Other"])
     condition = st.selectbox("Item Condition", ["New", "Like New", "Good", "Fair"])
     location = st.text_input("Your Location (e.g., Seattle, WA)")
-    uploaded_files = st.file_uploader("Upload 2-3 Photos", accept_multiple_files=True, type=["jpg", "png"])
+    details = st.text_area("Additional Details (e.g., VIN, model #, specs)", height=100)
+    is_bundle = st.checkbox("This is a bundle/lot (e.g., multiple items)")
+    uploaded_files = st.file_uploader("Upload 2-3 Photos per Item", accept_multiple_files=True, type=["jpg", "png"])
 
     if st.button("Generate Listing") and uploaded_files:
         image_paths = []
@@ -64,15 +69,26 @@ with tab1:
                 f.write(uploaded_file.getbuffer())
             image_paths.append(uploaded_file.name)
         
-        # Combined prompt: Description + prices in one call
-        combined_prompt = f"Analyze these photos of a used baby/toddler item in {condition} condition. First, generate a short appealing Facebook Marketplace title and description (highlight features, age suitability). Then, research average sold prices for similar used items in {location} and suggest a competitive price range."
+        # Combined prompt: Generalized, with request for links in price section, clean formatting
+        bundle_str = " (bundle/lot of items)" if is_bundle else ""
+        combined_prompt = f"Analyze these photos of a used {category} item{bundle_str} in {condition} condition. Details: {details}. Output in this exact format: Title: [short title]\nDescription: [appealing description]\nPrice: [clean price range e.g. $X-Y with explanation, include 2-3 direct links to sources like eBay/Craigslist listings]. First, generate the title and description highlighting features and suitability. Then, research average sold prices for similar new/used items in {location} and suggest a competitive range."
         combined_output = call_grok(combined_prompt, images=image_paths, use_search=True)
         
-        # Parse output (assume structured response)
-        lines = combined_output.split("\n")
-        item_name = lines[0] if lines else "Item"
-        description = "\n".join(lines[1:lines.index("Price:") if "Price:" in lines else len(lines)]) if lines else "Error"
-        price_suggestion = "\n".join(lines[lines.index("Price:") + 1:] if "Price:" in lines else []) or "Error"
+        # Improved parsing: Use keywords, extract links, clean garbled text
+        combined_output = combined_output.replace("−", "-")  # Fix common encoding issues
+        if "Title:" in combined_output and "Description:" in combined_output and "Price:" in combined_output:
+            parts = combined_output.split("Title:")[1].split("Description:")
+            item_name = parts[0].strip()
+            desc_parts = parts[1].split("Price:")
+            description = desc_parts[0].strip()
+            price_suggestion = desc_parts[1].strip() if len(desc_parts) > 1 else "Error: No price info"
+            # Extract links (assume in price text, e.g., http...)
+            links = [word for word in price_suggestion.split() if word.startswith("http")]
+        else:
+            item_name = "Item"
+            description = combined_output
+            price_suggestion = "Error: Incomplete response - try better photos or details"
+            links = []
         
         st.subheader("Suggested Title")
         st.write(item_name)
@@ -83,7 +99,15 @@ with tab1:
         st.subheader("Price Suggestion")
         st.write(price_suggestion)
         
+        if links:
+            st.subheader("Source Links for Further Research")
+            for link in links:
+                st.markdown(f"[View Source]({link})")
+        
         st.success("Copy to Marketplace! (One API call used)")
+        if "Error" in price_suggestion:
+            if st.button("Retry Generation"):
+                st.rerun()
 
 with tab2:
     buyer_message = st.text_area("Paste Buyer Message Here", height=100)
@@ -119,7 +143,7 @@ with tab2:
     preferred_locations = st.text_area("Preferred Meeting Locations (e.g., Local park, Mall)", height=100)
     
     if st.button("Generate Response") and buyer_message:
-        response_prompt = f"Buyer: '{buyer_message}'. Availability: '{availability_str}'. Locations: '{preferred_locations}'. Suggest 2-3 polite responses, suggesting times/locations if relevant."
+        response_prompt = f"Buyer: '{buyer_message}'. Availability: '{availability_str}'. Locations: '{preferred_locations}'. Suggest 2-3 polite responses, suggesting times/locations if relevant. Always include safety tips: Meet in public, cash only, keep comms in app."
         suggested_responses = call_grok(response_prompt)  # No search/images, cheaper
         
         st.subheader("Suggested Responses")
